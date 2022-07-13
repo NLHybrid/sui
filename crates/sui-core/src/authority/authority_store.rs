@@ -112,6 +112,16 @@ pub struct SuiDataStore<S> {
     assigned_object_versions: DBMap<(TransactionDigest, ObjectID), SequenceNumber>,
     next_object_versions: DBMap<ObjectID, SequenceNumber>,
 
+    /// Track which transactions have been processed in handle_consensus_transaction. We must be
+    /// sure to advance next_object_versions exactly once for each transaction we receive from
+    /// consensus. But, we may also be processing transactions from checkpoints, so we need to
+    /// track this state separately.
+    ///
+    /// Entries in this table can be garbage collected whenever we can prove that we won't receive
+    /// another handle_consensus_transaction call for the given digest. This probably means at
+    /// epoch change.
+    consensus_message_processed: DBMap<TransactionDigest, bool>,
+
     // Tables used for authority batch structure
     /// A sequence on all executed certificates and effects.
     pub executed_sequence: DBMap<TxSequenceNumber, ExecutionDigests>,
@@ -147,6 +157,7 @@ impl<S: Eq + Serialize + for<'de> Deserialize<'de>> SuiDataStore<S> {
                 ("effects", &point_lookup),
                 ("assigned_object_versions", &options),
                 ("next_object_versions", &options),
+                ("consensus_message_processed", &options),
                 ("executed_sequence", &options),
                 ("batches", &options),
                 ("last_consensus_index", &options),
@@ -169,6 +180,7 @@ impl<S: Eq + Serialize + for<'de> Deserialize<'de>> SuiDataStore<S> {
             effects,
             assigned_object_versions,
             next_object_versions,
+            consensus_message_processed,
             batches,
             last_consensus_index,
             epochs,
@@ -183,6 +195,7 @@ impl<S: Eq + Serialize + for<'de> Deserialize<'de>> SuiDataStore<S> {
             "effects";<TransactionDigest, TransactionEffectsEnvelope<S>>,
             "assigned_object_versions";<(TransactionDigest, ObjectID), SequenceNumber>,
             "next_object_versions";<ObjectID, SequenceNumber>,
+            "consensus_message_processed";<TransactionDigest, bool>,
             "batches";<TxSequenceNumber, SignedBatch>,
             "last_consensus_index";<u64, ExecutionIndices>,
             "epochs";<EpochId, EpochInfoLocals>
@@ -221,6 +234,7 @@ impl<S: Eq + Serialize + for<'de> Deserialize<'de>> SuiDataStore<S> {
             effects,
             assigned_object_versions,
             next_object_versions,
+            consensus_message_processed,
             executed_sequence,
             batches,
             last_consensus_index,
@@ -1116,6 +1130,7 @@ impl<S: Eq + Serialize + for<'de> Deserialize<'de>> SuiDataStore<S> {
 
     /// Lock a sequence number for the shared objects of the input transaction. Also update the
     /// last consensus index.
+    /// This function must only be called from the consensus task (i.e. from handle_consensus_transaction).
     pub fn persist_certificate_and_lock_shared_objects(
         &self,
         certificate: CertifiedTransaction,
@@ -1123,7 +1138,15 @@ impl<S: Eq + Serialize + for<'de> Deserialize<'de>> SuiDataStore<S> {
     ) -> Result<(), SuiError> {
         // Make an iterator to save the certificate.
         let transaction_digest = *certificate.digest();
-        // let certificate_to_write = std::iter::once((transaction_digest, &certificate));
+
+        // Ensure that we only advance next_object_versions exactly once for every cert received from
+        // consensus.
+        if self
+            .consensus_message_processed
+            .contains_key(&transaction_digest)?
+        {
+            return Ok(());
+        }
 
         // Make an iterator to update the locks of the transaction's shared objects.
         let ids = certificate.shared_input_objects();
@@ -1165,6 +1188,10 @@ impl<S: Eq + Serialize + for<'de> Deserialize<'de>> SuiDataStore<S> {
             write_batch.insert_batch(&self.assigned_object_versions, sequenced_to_write)?;
         write_batch = write_batch.insert_batch(&self.next_object_versions, schedule_to_write)?;
         write_batch = write_batch.insert_batch(&self.last_consensus_index, index_to_write)?;
+        write_batch = write_batch.insert_batch(
+            &self.consensus_message_processed,
+            std::iter::once((transaction_digest, true)),
+        )?;
         write_batch.write().map_err(SuiError::from)
     }
 

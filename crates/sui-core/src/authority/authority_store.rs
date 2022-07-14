@@ -1184,9 +1184,23 @@ impl<S: Eq + Serialize + for<'de> Deserialize<'de>> SuiDataStore<S> {
         // Atomically store all elements.
         let mut write_batch = self.assigned_object_versions.batch();
 
-        // If the tx has already been executed, we don't need to populate
-        // assigned_object_versions, and indeed we shouldn't because it will never be cleaned
-        // up.
+        // If the tx has already been executed, we don't need to populate assigned_object_versions,
+        // and indeed we shouldn't because it will never be cleaned up.
+        //
+        // It may appear that this can cause assigned_object_versions to be inconsistent with
+        // next_object_versions - however there is no real inconsistency. assigned_object_versions
+        // effectively contains different snapshots of next_object_versions at different points in
+        // time.
+        //
+        // When we set assigned_object_versions from next_object_versions, we are taking a
+        // snapshot.
+        //
+        // When we set it from a TransactionEffects structure, we are instead copying the
+        // snapshot that was taken by another validator at the time at which the transaction was
+        // sequenced.
+        //
+        // (Both checkpoints and the node follower system ensure that at least one
+        // honest validator has vouched for the TransactionEffects that were used).
         if !self.effects_exists(&transaction_digest)? {
             write_batch =
                 write_batch.insert_batch(&self.assigned_object_versions, sequenced_to_write)?;

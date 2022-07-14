@@ -1183,9 +1183,15 @@ impl<S: Eq + Serialize + for<'de> Deserialize<'de>> SuiDataStore<S> {
 
         // Atomically store all elements.
         let mut write_batch = self.assigned_object_versions.batch();
-        // Note: we have already written the certificates as part of the add_pending_certificates above.
-        write_batch =
-            write_batch.insert_batch(&self.assigned_object_versions, sequenced_to_write)?;
+
+        // If the tx has already been executed, we don't need to populate
+        // assigned_object_versions, and indeed we shouldn't because it will never be cleaned
+        // up.
+        if !self.effects_exists(&transaction_digest)? {
+            write_batch =
+                write_batch.insert_batch(&self.assigned_object_versions, sequenced_to_write)?;
+        }
+
         write_batch = write_batch.insert_batch(&self.next_object_versions, schedule_to_write)?;
         write_batch = write_batch.insert_batch(&self.last_consensus_index, index_to_write)?;
         write_batch = write_batch.insert_batch(
